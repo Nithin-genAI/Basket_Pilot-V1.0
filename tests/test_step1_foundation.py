@@ -24,6 +24,26 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(len(parsed.items), 1)
         self.assertEqual(parsed.ambiguities, ("0 kg onions",))
 
+    def test_parser_merges_duplicate_lines_after_name_normalization(self) -> None:
+        parsed = parse_list("1 kg Apples\n2 KG apples")
+
+        self.assertEqual(len(parsed.items), 1)
+        self.assertEqual(parsed.items[0].qty, 3)
+        self.assertEqual(parsed.items[0].unit, "kg")
+        self.assertFalse(parsed.ambiguities)
+
+    def test_parser_keeps_different_units_separate_and_reports_ambiguity(self) -> None:
+        parsed = parse_list("1 kg apple\n2 apples")
+
+        self.assertEqual(len(parsed.items), 2)
+        self.assertEqual({item.unit for item in parsed.items}, {"kg", None})
+        self.assertTrue(any("mixed units" in note for note in parsed.ambiguities))
+
+    def test_parser_handles_half_kilo_and_unqualified_dozen(self) -> None:
+        parsed = parse_list("1/2 kg tamatar\ndozen anday")
+
+        self.assertEqual([(item.qty, item.unit) for item in parsed.items], [(0.5, "kg"), (12, "piece")])
+
     def test_mock_adapters_return_normalized_candidates(self) -> None:
         zepto, instamart = default_mock_adapters()
 
