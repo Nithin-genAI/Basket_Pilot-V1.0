@@ -3,3 +3,5 @@
 .mcp-auth
 __pycache__/
 *.py[cod]
+docs/raw/
+data/

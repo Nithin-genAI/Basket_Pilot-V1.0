@@ -1,0 +1,1477 @@
+[
+  {
+    "name": "zepto_shop",
+    "title": null,
+    "description": "Open Zepto shopping experience for groceries and essentials delivery in 10 minutes.\n\n\u26a0\ufe0f MULTIPLE PRODUCTS: When the user asks for more than one product (e.g. \"diet coke and chips\", \"milk, bread, eggs\"), do NOT call this tool with that full string. Call search_multiple_products with a queries array instead (e.g. queries: [\"diet coke\", \"chips\"]) so the widget shows grouped results. zepto_shop with a query is for ONE product only.\n\nFor ChatGPT Apps: Opens a full interactive shopping widget with product search, cart management, address selection, checkout, and order tracking. Once the widget is displayed, all shopping actions are handled through widget interactions.\nSearch results should be presented as numbered lists.\n\nCORE RULE: Never pass raw user text directly into a search tool.\n\nBEFORE CALLING ANY SEARCH TOOL:\n1) Identify user intent (search, order, add-to-cart, browse)\n2) Decide whether the user mentions:\n   - A concrete purchasable product\n   - Multiple different products\n   - A dish, meal, or recipe\n   - A category or collection\n3) Normalize the request into one or more concrete purchasable product names\n\n\u26a0\ufe0f SINGLE PRODUCT ONLY: This tool only searches for ONE product at a time.\n- Use for: \"milk\", \"chips\", \"diet coke\" (single items)\n- DO NOT use for: \"chips and coke\", \"milk, bread, eggs\" (multiple items)\n- For MULTIPLE products: Use search_multiple_products tool instead with queries array.\n  Example: \"chips and diet coke\" \u2192 search_multiple_products({queries: [\"chips\", \"diet coke\"]})\n\nDISH / RECIPE HANDLING:\n- If the user mentions a dish, meal, or recipe, do NOT search the dish name\n- First resolve the dish into individual ingredients\n- Dish answers must be converted to ingredients and searched via search_multiple_products\n- If variants (veg / chicken / egg) are unclear, default to the most common option and proceed\n- Search each ingredient separately with search_products or use search_multiple_products\n\nAMBIGUITY RULE:\n- Never ask clarification questions\n- If the request is ambiguous or missing details, make a best-effort assumption and proceed\n\nQUALITY RULES:\n- Prefer concrete SKU-level or category-level product names\n- Handle spelling mistakes and informal language\n- If a guess is required, choose the most common/likely interpretation and proceed\n\nFor Claude CLI/MCP clients: DO NOT use this tool. Instead, use individual tools:\n  - search_products: Search for a single product\n  - search_multiple_products: Search for multiple different products\n  - view_cart: View current cart contents\n  - update_cart: Add/remove items from cart\n  - list_saved_addresses: View delivery addresses\n  - create_order: Place an order\n  - list_order_history: View past orders\n\nUse this tool ONLY when running in ChatGPT Apps with widget support.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "intent": {
+          "type": "string",
+          "enum": [
+            "search",
+            "order",
+            "browse",
+            "cart",
+            "orders",
+            "addresses"
+          ],
+          "description": "User intent: \"search\" for product lookup, \"order\" for complete ordering flow, \"browse\" for discovery, \"cart\" to view cart, \"orders\" for order history, \"addresses\" for address management"
+        },
+        "query": {
+          "type": "string",
+          "description": "Search query or product name if intent involves search (e.g., \"milk\", \"diet coke\")"
+        },
+        "quantity": {
+          "type": "number",
+          "description": "Desired quantity if ordering a specific product (default: 1)",
+          "default": 1
+        }
+      },
+      "required": [
+        "intent"
+      ]
+    },
+    "execution": null,
+    "outputSchema": {
+      "type": "object",
+      "description": "Initial state for the Zepto shopping widget",
+      "properties": {
+        "intent": {
+          "type": "string",
+          "description": "The shopping intent that triggered this widget"
+        },
+        "query": {
+          "type": "string",
+          "description": "Search query if provided"
+        },
+        "quantity": {
+          "type": "number",
+          "description": "Desired quantity"
+        },
+        "initialView": {
+          "type": "string",
+          "description": "Initial view to display in the widget"
+        }
+      },
+      "required": [
+        "intent",
+        "initialView"
+      ]
+    },
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/outputTemplate": "ui://zepto/main",
+      "openai/widgetAccessible": true,
+      "openai/widgetCSP": {
+        "connect_domains": [
+          "https://mcp.zepto.co.in"
+        ],
+        "resource_domains": [
+          "https://cdn.zeptonow.com",
+          "https://cdn.zepto.co.in",
+          "https://mcp.zepto.co.in"
+        ]
+      },
+      "openai/widgetDomain": "https://mcp.zepto.co.in",
+      "openai/widgetDescription": "Full Zepto shopping widget with product search, cart management, address selection, checkout, and order tracking. All shopping actions are performed through widget interactions - do not describe or suggest actions that require additional tool calls.",
+      "openai/toolInvocation/invoking": "Opening Zepto... If your browser asks for local network access, please click Allow to load the widget.",
+      "openai/toolInvocation/invoked": "Zepto ready"
+    }
+  },
+  {
+    "name": "search_products",
+    "title": null,
+    "description": "Search for ONE concrete purchasable product in the Zepto catalog. Returns matching products with prices, availability, and details.\n\nIf the user's message lists multiple products (e.g. \"X and Y\", \"A, B, and C\"), use search_multiple_products instead of this tool.\n\nSINGLE PRODUCT ONLY:\n- Use this tool only when the request maps to ONE concrete item\n- Examples: \"milk\", \"basmati rice\", \"biryani masala\"\n- Do NOT use for multiple products like \"chips and coke\" or \"milk, bread, eggs\"\n- For multiple different products, use search_multiple_products instead\n\nIMPORTANT \u2014 PAST ORDER OPTIMIZATION (do this FIRST):\n- If you have NOT yet called get_past_order_items in this conversation, STOP and call it FIRST before calling this tool\n- If you already have past order data in context from a previous get_past_order_items call, use that data \u2014 do NOT call it again\n- Check the past order list for a matching product and use the EXACT product name from past orders as the search query\n  (e.g., user says \"milk\" -> past orders have \"Amul Gold Milk 500ml\" -> search for \"Amul Gold Milk 500ml\")\n- This ensures the user's preferred product appears in search results\n- If no past-order match exists, proceed with normal search\n\nCORE RULE: Never pass raw user text directly into a search tool.\n\nBEFORE CALLING ANY SEARCH TOOL:\n1) Identify user intent (search, order, add-to-cart, browse)\n2) Decide whether the user mentions:\n   - A concrete purchasable product\n   - Multiple different products\n   - A dish, meal, or recipe\n   - A category or collection\n3) Normalize the request into a concrete purchasable product name\n\nDISH / RECIPE HANDLING:\n- If the user mentions a dish, meal, or recipe, do NOT search the dish name\n- First resolve the dish into individual ingredients\n- Dish answers must be converted to ingredients and searched via search_multiple_products\n- If variants (veg / chicken / egg) are unclear, default to the most common option and proceed\n- Search each ingredient separately with search_products or use search_multiple_products\n\nAMBIGUITY RULE:\n- Never ask clarification questions\n- If the request is ambiguous or missing details, make a best-effort assumption and proceed\n\nQUALITY RULES:\n- Prefer concrete SKU-level or category-level product names\n- Handle spelling mistakes and informal language\n- If a guess is required, choose the most common/likely interpretation and proceed\n\nFor widget-enabled clients: The widget displays product results with add-to-cart functionality.\nFor CLI/API clients: Returns structured product data with prices, availability, and IDs for cart operations. Present search results as a numbered list.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query (e.g., \"milk\", \"organic vegetables\", \"bread\")"
+        },
+        "pageNumber": {
+          "type": "number",
+          "description": "Page number for pagination (default: 0)",
+          "default": 0
+        }
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "execution": null,
+    "outputSchema": {
+      "type": "object",
+      "description": "Search results with products for widget display",
+      "properties": {
+        "products": {
+          "type": "array",
+          "description": "List of products matching the search query",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Unique product identifier"
+              },
+              "productVariantId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Product variant ID for cart operations"
+              },
+              "storeProductId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Store product ID"
+              },
+              "cartProductId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Cart product ID"
+              },
+              "name": {
+                "type": "string",
+                "description": "Product name"
+              },
+              "price": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "Current selling price in paisa (e.g., 9900 for \u20b999)"
+              },
+              "mrp": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "Maximum retail price in paisa (e.g., 12000 for \u20b9120)"
+              },
+              "imageUrl": {
+                "type": "string",
+                "description": "Product image URL"
+              },
+              "packSize": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Pack size (e.g., \"500ml\", \"1kg\")"
+              },
+              "availableQuantity": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "Available stock quantity"
+              },
+              "isAd": {
+                "type": "boolean",
+                "description": "Whether this is a sponsored product"
+              },
+              "variantId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Variant ID"
+              }
+            }
+          }
+        },
+        "query": {
+          "type": "string",
+          "description": "Original search query"
+        },
+        "totalCount": {
+          "type": "number",
+          "description": "Total number of products found"
+        }
+      },
+      "required": [
+        "products",
+        "query",
+        "totalCount"
+      ]
+    },
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true,
+      "openai/outputTemplate": "ui://zepto/search",
+      "openai/widgetCSP": {
+        "connect_domains": [
+          "https://mcp.zepto.co.in"
+        ],
+        "resource_domains": [
+          "https://cdn.zeptonow.com",
+          "https://cdn.zepto.co.in",
+          "https://mcp.zepto.co.in"
+        ]
+      },
+      "openai/widgetDomain": "https://mcp.zepto.co.in",
+      "openai/widgetDescription": "Interactive product search with add-to-cart functionality",
+      "openai/toolInvocation/invoking": "Searching products... If your browser asks for local network access, please click Allow to load the widget.",
+      "openai/toolInvocation/invoked": "Search results ready"
+    }
+  },
+  {
+    "name": "search_multiple_products",
+    "title": null,
+    "description": "Use this tool when the user asks for multiple items (e.g. \"diet coke and chips\", \"milk, bread, eggs\"). Search for MULTIPLE different products in parallel. ALWAYS use this tool when the user mentions more than one product.\n\nIMPORTANT \u2014 PAST ORDER OPTIMIZATION (do this FIRST):\n- If you have NOT yet called get_past_order_items in this conversation, STOP and call it FIRST before calling this tool\n- If you already have past order data in context from a previous get_past_order_items call, use that data \u2014 do NOT call it again\n- For each product the user mentions, check the past order list for a matching product and use the EXACT product name from past orders as the search query\n  (e.g., user says \"milk and bread\" -> past orders have \"Amul Gold Milk 500ml\" and \"Harvest Gold White Bread 400g\" -> queries: [\"Amul Gold Milk 500ml\", \"Harvest Gold White Bread 400g\"])\n- This ensures the user's preferred products appear in search results\n- If no past-order match exists for a product, use the normalized product name as usual\n\nCORE RULE: Never pass raw user text directly into a search tool.\n\nBEFORE CALLING ANY SEARCH TOOL:\n1) Identify user intent (search, order, add-to-cart, browse)\n2) Decide whether the user mentions:\n   - A concrete purchasable product\n   - Multiple different products\n   - A dish, meal, or recipe\n   - A category or collection\n3) Normalize the request into one or more concrete purchasable product names\n\nALWAYS use this tool when the query contains:\n- \"and\" connecting products: \"chips and diet coke\", \"milk and bread\"\n- Commas listing products: \"chips, coke, popcorn\", \"milk, bread, eggs\"\n- Multiple items: \"I need chips and also get me a coke\"\n\nHow to call this tool:\n- \"chips and diet coke\" -> queries: [\"chips\", \"diet coke\"]\n- \"Order milk, bread, and eggs\" -> queries: [\"milk\", \"bread\", \"eggs\"]\n- \"Get me popcorn, nachos, and cola\" -> queries: [\"popcorn\", \"nachos\", \"cola\"]\n\nParse the user's request into individual product terms. Each term becomes a separate search.\nReturns grouped results with separate sections for each query, displayed with headers. Present each section's results as a numbered list.\n\nDISH / RECIPE HANDLING:\n- If the user mentions a dish, meal, or recipe, do NOT search the dish name\n- First resolve the dish into individual ingredients\n- Dish answers must be converted to ingredients and searched via search_multiple_products\n- If variants (veg / chicken / egg) are unclear, default to the most common option and proceed\n- Search each ingredient individually using search_products or include them in queries\n\nAMBIGUITY RULE:\n- Never ask clarification questions\n- If the request is ambiguous or missing details, make a best-effort assumption and proceed\n\nQUALITY RULES:\n- Prefer concrete SKU-level or category-level product names\n- Handle spelling mistakes and informal language\n- If a guess is required, choose the most common/likely interpretation and proceed\n\nFor SINGLE product searches only (e.g., just \"milk\"), use search_products instead.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Array of search queries (e.g., [\"chips\", \"diet coke\", \"popcorn\"])"
+        },
+        "pageNumber": {
+          "type": "number",
+          "description": "Page number for pagination (default: 0)",
+          "default": 0
+        }
+      },
+      "required": [
+        "queries"
+      ]
+    },
+    "execution": null,
+    "outputSchema": {
+      "type": "object",
+      "description": "Grouped search results with sections for each query",
+      "properties": {
+        "sections": {
+          "type": "array",
+          "description": "Array of search result sections, one per query",
+          "items": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The search query for this section"
+              },
+              "products": {
+                "type": "array",
+                "description": "Products matching this query",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "description": "Unique product identifier"
+                    },
+                    "productVariantId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Product variant ID for cart operations"
+                    },
+                    "storeProductId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Store product ID"
+                    },
+                    "cartProductId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Cart product ID"
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "Product name"
+                    },
+                    "price": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "description": "Current selling price in paisa"
+                    },
+                    "mrp": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "description": "Maximum retail price in paisa"
+                    },
+                    "imageUrl": {
+                      "type": "string",
+                      "description": "Product image URL"
+                    },
+                    "packSize": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Pack size"
+                    },
+                    "availableQuantity": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "description": "Available stock"
+                    },
+                    "isAd": {
+                      "type": "boolean",
+                      "description": "Sponsored product flag"
+                    },
+                    "variantId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Variant ID"
+                    }
+                  }
+                }
+              },
+              "totalCount": {
+                "type": "number",
+                "description": "Number of products in this section"
+              }
+            }
+          }
+        },
+        "totalSections": {
+          "type": "number",
+          "description": "Total number of search sections"
+        }
+      },
+      "required": [
+        "sections",
+        "totalSections"
+      ]
+    },
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true,
+      "openai/outputTemplate": "ui://zepto/search",
+      "openai/widgetCSP": {
+        "connect_domains": [
+          "https://mcp.zepto.co.in"
+        ],
+        "resource_domains": [
+          "https://cdn.zeptonow.com",
+          "https://cdn.zepto.co.in",
+          "https://mcp.zepto.co.in"
+        ]
+      },
+      "openai/widgetDomain": "https://mcp.zepto.co.in",
+      "openai/widgetDescription": "Multi-product search with grouped results and add-to-cart functionality"
+    }
+  },
+  {
+    "name": "get_product_details",
+    "title": null,
+    "description": "Get detailed information about a specific product. Returns comprehensive product details including pricing, availability, specifications, ratings, description, return policy, and seller information.\n\nUse this tool when:\n- User wants to know more about a specific product\n- User asks about product specifications, materials, size, etc.\n- User wants to check product ratings and reviews count\n- User asks about return/exchange policy for a product\n- User needs seller or manufacturer information\n- User wants to see all available information before making a purchase decision\n\nThe product_variant_id can be obtained from search results.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "product_variant_id": {
+          "type": "string",
+          "description": "The unique identifier for the product variant (UUID format). This ID is returned in search results."
+        }
+      },
+      "required": [
+        "product_variant_id"
+      ]
+    },
+    "execution": null,
+    "outputSchema": {
+      "type": "object",
+      "description": "Detailed product information for widget display",
+      "properties": {
+        "productId": {
+          "type": "string",
+          "description": "Unique product identifier"
+        },
+        "productVariantId": {
+          "type": "string",
+          "description": "Product variant ID for cart operations"
+        },
+        "storeProductId": {
+          "type": "string",
+          "description": "Store product ID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Full product name"
+        },
+        "rawTitle": {
+          "type": "string",
+          "description": "Short product title"
+        },
+        "brand": {
+          "type": "string",
+          "description": "Brand name"
+        },
+        "brandId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Brand ID"
+        },
+        "mrp": {
+          "type": "number",
+          "description": "Maximum retail price in paisa"
+        },
+        "sellingPrice": {
+          "type": "number",
+          "description": "Current selling price in paisa"
+        },
+        "discountPercent": {
+          "type": "number",
+          "description": "Discount percentage"
+        },
+        "formattedMrp": {
+          "type": "string",
+          "description": "Formatted MRP with currency symbol"
+        },
+        "formattedSellingPrice": {
+          "type": "string",
+          "description": "Formatted selling price"
+        },
+        "availableQuantity": {
+          "type": "number",
+          "description": "Available stock quantity"
+        },
+        "maxAllowedQuantity": {
+          "type": "number",
+          "description": "Maximum quantity per order"
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether product is active"
+        },
+        "isInStock": {
+          "type": "boolean",
+          "description": "Whether product is in stock"
+        },
+        "averageRating": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Average rating (1-5)"
+        },
+        "totalRatings": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Total number of ratings"
+        },
+        "description": {
+          "type": "string",
+          "description": "Product description"
+        },
+        "productDetails": {
+          "type": "array",
+          "description": "Product specifications as key-value pairs",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "highlights": {
+          "type": "array",
+          "description": "Product highlights as key-value pairs",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "information": {
+          "type": "array",
+          "description": "Additional product information as key-value pairs",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "keyHighlights": {
+          "type": "array",
+          "description": "Key product highlights as key-value pairs",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "sellerName": {
+          "type": "string",
+          "description": "Seller name"
+        },
+        "sellerAddress": {
+          "type": "string",
+          "description": "Seller address"
+        },
+        "manufacturerName": {
+          "type": "string",
+          "description": "Manufacturer name"
+        },
+        "countryOfOrigin": {
+          "type": "string",
+          "description": "Country of origin"
+        },
+        "isReturnable": {
+          "type": "boolean",
+          "description": "Whether product is returnable"
+        },
+        "isReplaceable": {
+          "type": "boolean",
+          "description": "Whether product is replaceable"
+        },
+        "returnWindowDays": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Return window in days"
+        },
+        "isSizeExchangeAvailable": {
+          "type": "boolean",
+          "description": "Whether size exchange is available"
+        },
+        "trustMarkers": {
+          "type": "array",
+          "description": "Trust markers and badges",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "images": {
+          "type": "array",
+          "description": "Product image URLs",
+          "items": {
+            "type": "string"
+          }
+        },
+        "category": {
+          "type": "string",
+          "description": "Product category"
+        },
+        "subcategory": {
+          "type": "string",
+          "description": "Product subcategory"
+        },
+        "packSize": {
+          "type": "string",
+          "description": "Pack size (e.g., \"1 pc\", \"500ml\")"
+        },
+        "unitOfMeasure": {
+          "type": "string",
+          "description": "Unit of measure"
+        },
+        "weightInGms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Weight in grams"
+        }
+      },
+      "required": [
+        "productId",
+        "productVariantId",
+        "storeProductId",
+        "name",
+        "mrp",
+        "sellingPrice",
+        "formattedMrp",
+        "formattedSellingPrice",
+        "availableQuantity",
+        "isInStock",
+        "images"
+      ]
+    },
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true,
+      "openai/outputTemplate": "ui://zepto/product-details",
+      "openai/widgetCSP": {
+        "connect_domains": [
+          "https://mcp.zepto.co.in"
+        ],
+        "resource_domains": [
+          "https://cdn.zeptonow.com",
+          "https://cdn.zepto.co.in",
+          "https://mcp.zepto.co.in"
+        ]
+      },
+      "openai/widgetDomain": "https://mcp.zepto.co.in",
+      "openai/widgetDescription": "Detailed product information with images, specs, and add-to-cart",
+      "openai/toolInvocation/invoking": "Loading product details... If your browser asks for local network access, please click Allow to load the widget.",
+      "openai/toolInvocation/invoked": "Product details loaded"
+    }
+  },
+  {
+    "name": "get_location_serviceability",
+    "title": null,
+    "description": "Check if Zepto services a location and get nearby store details. Returns store information and serviceability status.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "latitude": {
+          "type": "number",
+          "description": "Latitude coordinate of the delivery location"
+        },
+        "longitude": {
+          "type": "number",
+          "description": "Longitude coordinate of the delivery location"
+        }
+      },
+      "required": [
+        "latitude",
+        "longitude"
+      ]
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true
+    }
+  },
+  {
+    "name": "select_store",
+    "title": null,
+    "description": "Selects a store for the current session. All subsequent shopping operations will use this store. The store must be obtained from list_all_stores.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "storeId": {
+          "type": "string",
+          "description": "Store ID from list_all_stores response"
+        },
+        "latitude": {
+          "type": "number",
+          "description": "Optional: Latitude for this store location"
+        },
+        "longitude": {
+          "type": "number",
+          "description": "Optional: Longitude for this store location"
+        }
+      },
+      "required": [
+        "storeId"
+      ]
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": null,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true
+    }
+  },
+  {
+    "name": "list_saved_addresses",
+    "title": null,
+    "description": "List all saved customer addresses for the authenticated user.\n\nFor ChatGPT Apps: Displays an interactive widget with saved addresses and selection functionality. After the widget loads, guide users to click on an address in the widget to select it for delivery.\n\nFor Claude CLI/MCP clients: Returns structured address data with IDs, formatted addresses, and location coordinates. Use select_saved_address tool to set an address for delivery.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true,
+      "openai/outputTemplate": "ui://zepto/addresses",
+      "openai/widgetCSP": {
+        "connect_domains": [
+          "https://mcp.zepto.co.in"
+        ],
+        "resource_domains": [
+          "https://cdn.zeptonow.com",
+          "https://cdn.zepto.co.in",
+          "https://mcp.zepto.co.in"
+        ]
+      },
+      "openai/widgetDomain": "https://mcp.zepto.co.in",
+      "openai/widgetDescription": "View and select saved delivery addresses",
+      "openai/toolInvocation/invoking": "Loading addresses... If your browser asks for local network access, please click Allow to load the widget.",
+      "openai/toolInvocation/invoked": "Addresses loaded"
+    }
+  },
+  {
+    "name": "select_saved_address",
+    "title": null,
+    "description": "Pick a saved address and automatically set the corresponding store context for future actions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addressId": {
+          "type": "string",
+          "description": "The unique ID of the saved address. Use the ID value returned by list_saved_addresses, NOT the label or index number. Do NOT fabricate or guess this value."
+        }
+      },
+      "required": [
+        "addressId"
+      ]
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": null,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true
+    }
+  },
+  {
+    "name": "add_saved_address",
+    "title": null,
+    "description": "Create and save a new delivery address for the authenticated user. Requires location coordinates (latitude/longitude) and address details like flat number, building name, and a Google Maps formatted address. For Indian users, contactName and contactNumber should be provided. For international users, these fields can be omitted. After saving, the address will appear in list_saved_addresses and can be selected with select_saved_address.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "HOME",
+            "WORK",
+            "OTHER"
+          ],
+          "description": "Address label type"
+        },
+        "name": {
+          "type": "string",
+          "description": "Custom label for the address (e.g., \"Mom's place\", \"Office\")"
+        },
+        "flatDetails": {
+          "type": "string",
+          "description": "Flat/house number and floor details"
+        },
+        "buildingName": {
+          "type": "string",
+          "description": "Building or society name"
+        },
+        "landmark": {
+          "type": "string",
+          "description": "Nearby landmark (optional)"
+        },
+        "latitude": {
+          "type": "number",
+          "description": "Latitude coordinate of the address"
+        },
+        "longitude": {
+          "type": "number",
+          "description": "Longitude coordinate of the address"
+        },
+        "formattedAddress": {
+          "type": "string",
+          "description": "Full formatted address (from Google Maps or user description)"
+        },
+        "shortAddress": {
+          "type": "string",
+          "description": "Short display address (area, city, state)"
+        },
+        "contactName": {
+          "type": "string",
+          "description": "Contact person name for delivery. Required for Indian users, can be omitted for international users."
+        },
+        "contactNumber": {
+          "type": "string",
+          "description": "Contact phone number for delivery. Required for Indian users, can be omitted for international users."
+        },
+        "floor": {
+          "type": "string",
+          "description": "Floor number (optional)"
+        },
+        "buildingType": {
+          "type": "string",
+          "enum": [
+            "BUILDING_TYPE_SOCIETY",
+            "BUILDING_TYPE_HOUSE",
+            "BUILDING_TYPE_OTHERS",
+            "BUILDING_TYPE_UNSPECIFIED"
+          ],
+          "description": "Type of building (defaults to BUILDING_TYPE_SOCIETY)"
+        }
+      },
+      "required": [
+        "type",
+        "name",
+        "flatDetails",
+        "buildingName",
+        "latitude",
+        "longitude",
+        "formattedAddress",
+        "shortAddress"
+      ]
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": null,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true
+    }
+  },
+  {
+    "name": "update_drop_zone",
+    "title": null,
+    "description": "Update the delivery drop zone for an address. This tool is REQUIRED before placing an order when the cart response indicates a drop zone selection is needed (event/venue delivery locations).\n\nGUARDRAILS:\n- ONLY call this tool when create_order returns a dropZoneRequired response with available slots. Do NOT call it speculatively.\n- The dropZoneSlot value MUST exactly match one of the slot values returned by create_order in the dropZoneConfig.slots array. Do NOT fabricate or modify slot values.\n- ALWAYS present the full list of available drop zone slots to the user and let them choose. Do NOT auto-select a slot on the user's behalf.\n- The addressId MUST be a valid saved address ID from list_saved_addresses or select_saved_address. Do NOT use fabricated IDs.\n- After a successful update, call create_order again to proceed with order placement. The drop zone update does NOT place the order by itself.\n- If the PATCH call fails, inform the user and do NOT proceed with order placement.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addressId": {
+          "type": "string",
+          "description": "Address ID to update. Must be the address ID currently selected for delivery."
+        },
+        "dropZoneSlot": {
+          "type": "string",
+          "description": "Selected drop zone value. Must exactly match a value from the dropZoneConfig slots (e.g., \"Hall - 1, Ground Floor\")."
+        }
+      },
+      "required": [
+        "dropZoneSlot"
+      ]
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": null,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true
+    }
+  },
+  {
+    "name": "get_user_details",
+    "title": null,
+    "description": "Fetch the authenticated user's profile details including name, email, phone number, referral code, account status, and user type. No input parameters required.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": null
+  },
+  {
+    "name": "update_user_name",
+    "title": null,
+    "description": "Updates the authenticated user's full name to complete their registration on Zepto.\n\nWhen to use this tool:\n- Call this tool ONLY after get_user_details has returned isRegistered as false, indicating the user has not yet completed registration.\n- Before calling this tool, you MUST ask the user for their full name. Do not assume or fabricate a name.\n\nBehavior:\n- Sends a PATCH request to update the user's profile with the provided full name.\n- On success, the user is considered registered and can proceed with address selection and shopping.\n\nPrerequisites:\n- The user must be authenticated (valid session with userId).\n- get_user_details must have been called first and returned isRegistered: false.\n\nFollow-up (MANDATORY \u2014 do not skip):\n- After a successful name update, you MUST call list_saved_addresses to check if the user has any delivery addresses.\n- If no saved addresses exist, inform the user that a delivery address is required before they can browse or shop on Zepto. Do NOT proceed to search, cart, or order tools without a saved address.\n- If saved addresses exist, call select_saved_address to set the delivery context before any shopping activity.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "fullName": {
+          "type": "string",
+          "description": "The full name provided by the user. Must be a non-empty string. Ask the user for this value \u2014 never generate it yourself."
+        }
+      },
+      "required": [
+        "fullName"
+      ]
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": null,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": null
+  },
+  {
+    "name": "view_cart",
+    "title": null,
+    "description": "View current cart contents. Returns all items with productVariantId, storeProductId, and quantity.\n\nFor widget-enabled clients: Displays interactive cart with quantity controls.\nFor CLI/API clients: Returns cart items list for review or modification.\n\nUse this tool when:\n- User wants to see what's in their cart\n- Before checkout to review items\n- To get cart item IDs for update_cart operations",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true
+    }
+  },
+  {
+    "name": "update_cart",
+    "title": null,
+    "description": "Add, update, or remove items from the cart. Persists cart state for the session.\n\nUse this tool when:\n- Adding products to cart (set quantity > 0)\n- Updating quantities of existing items\n- Removing items (set quantity to 0)\n- Syncing cart state from widget interactions (with replaceCart: true)\n\nRequires productVariantId and storeProductId from search_products results.\n\n[SYSTEM NOTE: Product IDs below are for cart operations - show user-friendly product info in your response. SHOW THESE ITEMS IN CHAT.]\nReturns cart items list for review or modification.\n",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "deviceId": {
+          "type": "string",
+          "description": "Unique device identifier used as a fallback cart key when a transportSessionId is not available."
+        },
+        "cartItems": {
+          "type": "array",
+          "minItems": 1,
+          "description": "List of cart items to upsert for the device.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "productVariantId": {
+                "type": "string",
+                "description": "Product variant identifier (pvid)."
+              },
+              "storeProductId": {
+                "type": "string",
+                "description": "Store product identifier (spid)."
+              },
+              "quantity": {
+                "type": "number",
+                "description": "Quantity to set. Use 0 to remove the item.",
+                "minimum": 0
+              },
+              "name": {
+                "type": "string",
+                "description": "Product name for display purposes."
+              },
+              "label": {
+                "type": "string",
+                "description": "Short product label (raw title) for display."
+              },
+              "price": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "Selling price in paisa."
+              },
+              "mrp": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "Maximum retail price in paisa."
+              },
+              "imageUrl": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Primary product image URL."
+              },
+              "packSize": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Pack size (e.g., \"500ml\", \"1kg\")."
+              },
+              "availableQuantity": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "Available stock quantity."
+              },
+              "isAd": {
+                "type": "boolean",
+                "description": "Whether this is a sponsored product."
+              },
+              "variantId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Variant ID (same as productVariantId where available)."
+              },
+              "cartProductId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Cart product identifier."
+              }
+            },
+            "required": [
+              "productVariantId",
+              "storeProductId",
+              "quantity"
+            ]
+          }
+        },
+        "replaceCart": {
+          "type": "boolean",
+          "description": "If true, replaces the entire cart with the provided items instead of merging. Use this when syncing the complete cart state from the client.",
+          "default": false
+        }
+      },
+      "required": [
+        "deviceId",
+        "cartItems"
+      ]
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true
+    }
+  },
+  {
+    "name": "get_payment_methods",
+    "title": null,
+    "description": "Get available payment methods for the current cart. Call this before placing an order so the user can choose their preferred payment method. Returns COD and online payment options with availability status.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true
+    }
+  },
+  {
+    "name": "create_order",
+    "title": null,
+    "description": "Place a COD (Cash on Delivery) order via Zepto order API. IMPORTANT: Before calling this tool, always call get_payment_methods first to let the user choose their preferred payment method. Requires store context (from get_location_serviceability or select_store).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "confirmOrder": {
+          "type": "boolean",
+          "description": "Set to false (or omit) initially to generate a cart preview. Only set to true after the user has reviewed the preview and explicitly confirmed."
+        },
+        "riderTip": {
+          "type": "number",
+          "description": "Tip for the rider.",
+          "default": 0
+        },
+        "userAddressId": {
+          "type": "string",
+          "description": "Address ID to associate with the cart."
+        },
+        "useZeptoCash": {
+          "type": "boolean",
+          "description": "Whether to apply Zepto Cash to the order.",
+          "default": false
+        }
+      },
+      "required": []
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": null,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true
+    }
+  },
+  {
+    "name": "create_online_payment_order",
+    "title": null,
+    "description": "Place an order via Zepto using an online payment link. Before calling this tool, always call get_payment_methods first to let the user choose their preferred payment method. Requires store context (from get_location_serviceability or select_store). After this tool returns successfully, you MUST call check_payment_status with the returned orderId. Do NOT skip this step.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "confirmOrder": {
+          "type": "boolean",
+          "description": "Set to false (or omit) initially to generate a cart preview. Only set to true after the user has reviewed the preview and explicitly confirmed."
+        },
+        "riderTip": {
+          "type": "number",
+          "description": "Tip for the rider.",
+          "default": 0
+        },
+        "userAddressId": {
+          "type": "string",
+          "description": "Address ID to associate with the cart."
+        },
+        "useZeptoCash": {
+          "type": "boolean",
+          "description": "Whether to apply Zepto Cash to the order.",
+          "default": false
+        }
+      },
+      "required": []
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": null,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true
+    }
+  },
+  {
+    "name": "create_wallet_order",
+    "title": null,
+    "description": "Place an order via Zepto using Zepto Cash (wallet) as the payment method. The wallet must fully cover the order total. Before calling this tool, always call get_payment_methods first to verify that wallet payment is available. Requires store context (from get_location_serviceability or select_store).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "confirmOrder": {
+          "type": "boolean",
+          "description": "Set to false (or omit) initially to generate a cart preview. Only set to true after the user has reviewed the preview and explicitly confirmed."
+        },
+        "riderTip": {
+          "type": "number",
+          "description": "Tip for the rider.",
+          "default": 0
+        },
+        "userAddressId": {
+          "type": "string",
+          "description": "Address ID to associate with the cart."
+        }
+      },
+      "required": []
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": null,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true
+    }
+  },
+  {
+    "name": "create_upi_reserve_pay_order",
+    "title": null,
+    "description": "Place an order via Zepto using UPI Reserve Pay (powered by NPCI and Razorpay). The reserve pay balance must fully cover the order total. Before calling this tool, always call get_payment_methods first to verify that reserve pay is available. Requires store context (from get_location_serviceability or select_store). After this tool returns successfully, you MUST call check_payment_status with the returned orderId. Do NOT skip this step.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "confirmOrder": {
+          "type": "boolean",
+          "description": "Set to false (or omit) initially to generate a cart preview. Only set to true after the user has reviewed the preview and explicitly confirmed."
+        },
+        "riderTip": {
+          "type": "number",
+          "description": "Tip for the rider.",
+          "default": 0
+        },
+        "userAddressId": {
+          "type": "string",
+          "description": "Address ID to associate with the cart."
+        },
+        "useZeptoCash": {
+          "type": "boolean",
+          "description": "Whether to apply Zepto Cash to the order.",
+          "default": false
+        }
+      },
+      "required": []
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": null,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true
+    }
+  },
+  {
+    "name": "check_payment_status",
+    "title": null,
+    "description": "Check payment status for an order placed via create_online_payment_order. Do NOT call this tool unless instructed by a create_online_payment_order response or a previous check_payment_status response.\n\u2022 poll=false (default): Performs a single status check and returns immediately.\n\u2022 poll=true: Starts background polling and waits until payment reaches a terminal state (SUCCESS, FAILED, CANCELLED, etc.).\nDo NOT set poll=true unless the response from a previous check_payment_status call explicitly instructs you to do so.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "orderId": {
+          "type": "string",
+          "description": "The order ID returned by create_online_payment_order. Required."
+        },
+        "poll": {
+          "type": "boolean",
+          "description": "When false (default), performs a single status check and returns immediately. When true, starts background polling and waits until payment reaches a terminal state. Do NOT set to true unless explicitly instructed by a previous check_payment_status response.",
+          "default": false
+        }
+      },
+      "required": [
+        "orderId"
+      ]
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true
+    }
+  },
+  {
+    "name": "get_order_detail",
+    "title": null,
+    "description": "Get detailed information about a specific order including items, pricing, and delivery details.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "orderId": {
+          "type": "string",
+          "description": "Order ID"
+        }
+      },
+      "required": [
+        "orderId"
+      ]
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true
+    }
+  },
+  {
+    "name": "list_order_history",
+    "title": null,
+    "description": "Get list of past orders for the user. Can also be used to fetch order status or order tracking information.\n\nFor ChatGPT Apps: Displays an interactive widget with order history, tracking, and reordering functionality. After the widget loads, guide users to click on orders in the widget to view details or track delivery.\n\nFor Claude CLI/MCP clients: Returns structured order data with order IDs, status, items, and delivery information that can be presented to the user.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "number",
+          "description": "Number of orders to fetch (default: 10)",
+          "default": 10
+        },
+        "pageNumber": {
+          "type": "number",
+          "description": "Page number for order history pagination (default: 1)",
+          "default": 1
+        }
+      },
+      "required": []
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "openai/widgetAccessible": true,
+      "openai/outputTemplate": "ui://zepto/orders",
+      "openai/widgetCSP": {
+        "connect_domains": [
+          "https://mcp.zepto.co.in"
+        ],
+        "resource_domains": [
+          "https://cdn.zeptonow.com",
+          "https://cdn.zepto.co.in",
+          "https://mcp.zepto.co.in"
+        ]
+      },
+      "openai/widgetDomain": "https://mcp.zepto.co.in",
+      "openai/widgetDescription": "View order history and track deliveries",
+      "openai/toolInvocation/invoking": "Loading orders... If your browser asks for local network access, please click Allow to load the widget.",
+      "openai/toolInvocation/invoked": "Orders loaded"
+    }
+  },
+  {
+    "name": "get_past_order_items",
+    "title": null,
+    "description": "MANDATORY FIRST STEP before any product search. Call this tool BEFORE calling search_products or search_multiple_products.\n\nReturns a list of unique products the user has ordered in their last 30+ orders, sorted by order frequency. Use the EXACT product names from this list as search queries instead of generic terms.\n\nWHEN TO CALL:\n- ALWAYS call this tool first when the user wants to search, order, or add any product to cart\n- Only call once per conversation \u2014 after that, reuse the data already in your context\n\nWORKFLOW:\n1. User says \"order me milk\" \u2192 call get_past_order_items first\n2. Past orders show \"Amul Gold Milk 500ml\" (ordered 8 times) \u2192 use this exact name\n3. Call search_products(query=\"Amul Gold Milk 500ml\") \u2192 guaranteed match\n\nReturns: product name, productVariantId, and frequency (number of distinct orders containing that product).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "execution": null,
+    "outputSchema": null,
+    "icons": null,
+    "annotations": {
+      "title": null,
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": null,
+      "openWorldHint": false
+    },
+    "_meta": null
+  }
+]
