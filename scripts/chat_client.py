@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
+import sys
 import threading
 
+# Running ``python scripts/chat_client.py`` puts ``scripts/`` on sys.path,
+# not the project root. Add the root so the documented direct command works
+# without requiring an editable install or a PYTHONPATH override.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from basketpilot.agents.terminal import create_terminal_agent
-from basketpilot.run import build_bureau, seed_for
+from basketpilot.run import build_bureau, load_local_env, seed_for
 
 
 async def _input(prompt: str) -> str:
@@ -17,6 +26,7 @@ async def _input(prompt: str) -> str:
 def _serve(initial: str) -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    load_local_env()
     os.environ.setdefault("BP_USE_MOCK", "true")
     os.environ.setdefault("BP_MAILBOX", "false")
     os.environ.setdefault("BP_ALLOW_ORDERS", "false")
