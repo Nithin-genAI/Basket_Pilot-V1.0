@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -15,11 +17,46 @@ from uagents_core.contrib.protocols.chat import (
 )
 
 from basketpilot import messages
-from basketpilot.run import build_bureau, seed_for
+from basketpilot.agents.orchestrator import configured_zepto_address_id
+from basketpilot.run import build_bureau, load_local_env, seed_for
 from basketpilot.session import SessionStore, transition
 
 
+class TerminalEntrypointTests(unittest.TestCase):
+    def test_direct_script_launch_resolves_project_package(self) -> None:
+        project_root = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            [sys.executable, str(project_root / "scripts" / "chat_client.py")],
+            input="\n",
+            text=True,
+            capture_output=True,
+            cwd=project_root,
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("No list supplied.", result.stdout)
+
+
 class WireModelTests(unittest.TestCase):
+    def test_local_env_loads_missing_values_without_overriding_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            env_file = Path(temp) / ".env"
+            env_file.write_text(
+                "# local settings\nBP_SEED_PARSER='local-seed'\nBP_USE_MOCK=false\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"BP_USE_MOCK": "true"}, clear=True):
+                load_local_env(env_file)
+                self.assertEqual(os.environ["BP_SEED_PARSER"], "local-seed")
+                self.assertEqual(os.environ["BP_USE_MOCK"], "true")
+
+    def test_configured_zepto_address_is_the_standing_selection(self) -> None:
+        with patch.dict(os.environ, {"ZEPTO_ADDRESS_ID": "  saved-id  "}, clear=True):
+            self.assertEqual(configured_zepto_address_id(), "saved-id")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(configured_zepto_address_id())
+
     def test_local_mode_requires_environment_seeds_and_rejects_mailbox(self) -> None:
         with patch.dict(os.environ, {"BP_MAILBOX": "true"}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "local-only"):
@@ -46,12 +83,17 @@ class WireModelTests(unittest.TestCase):
         )
         restored = messages.CartPlan.parse_raw(plan.json())
         self.assertEqual(restored, plan)
+        request = messages.CheckoutRequest(
+            session_id="s-1", action="build_preview", platform="zepto", assignments=[],
+        )
+        self.assertFalse(request.cart_write_confirmed)
 
     def test_session_transitions_and_invalid_transition(self) -> None:
         self.assertEqual(transition("IDLE", "list"), "COLLECTING_LIST")
         self.assertEqual(transition("COLLECTING_LIST", "parsed"), "NEED_ADDRESS")
         self.assertEqual(transition("NEED_ADDRESS", "address"), "SEARCHING")
-        self.assertEqual(transition("CART_BUILDING", "preview"), "AWAITING_CONFIRM")
+        self.assertEqual(transition("PLAN_READY", "cart_confirm"), "CART_BUILDING")
+        self.assertEqual(transition("CART_BUILDING", "preview"), "PREVIEW_READY")
         with self.assertRaises(ValueError):
             transition("IDLE", "confirm")
 
@@ -84,7 +126,7 @@ class LocalBureauTests(unittest.IsolatedAsyncioTestCase):
             "BP_SEED_SEARCH_INSTAMART_MOCK": "test-instamart-seed-basketpilot-3b",
         }, clear=False):
             done = threading.Event()
-            shared: dict[str, object] = {"replies": [], "acks": [], "interaction": {"address": False, "confirmed": False}, "error": None}
+            shared: dict[str, object] = {"replies": [], "acks": [], "interaction": {"address": False, "cart_authorized": False, "preview": False}, "error": None}
             refs: dict[str, object] = {}
 
             def run_local_bureau() -> None:
@@ -114,10 +156,11 @@ class LocalBureauTests(unittest.IsolatedAsyncioTestCase):
                         if "which delivery address" in lowered and not interaction["address"]:
                             interaction["address"] = True
                             await ctx.send(orchestrator.address, ChatMessage(content=[TextContent(type="text", text="home")]))
-                        elif "reply `confirm`" in lowered and not interaction["confirmed"]:
-                            interaction["confirmed"] = True
-                            await ctx.send(orchestrator.address, ChatMessage(content=[TextContent(type="text", text="confirm")]))
-                        elif "dry_run" in lowered:
+                        elif "reply exactly `add to cart`" in lowered and not interaction["cart_authorized"]:
+                            interaction["cart_authorized"] = True
+                            await ctx.send(orchestrator.address, ChatMessage(content=[TextContent(type="text", text="add to cart")]))
+                        elif "preview complete. no order was placed" in lowered:
+                            interaction["preview"] = True
                             done.set()
                             if bureau._server.server is not None:
                                 bureau._server.server.should_exit = True
@@ -157,10 +200,11 @@ class LocalBureauTests(unittest.IsolatedAsyncioTestCase):
             interaction = shared["interaction"]
             replies = shared["replies"]
             self.assertTrue(interaction["address"])
-            self.assertTrue(interaction["confirmed"])
+            self.assertTrue(interaction["cart_authorized"])
+            self.assertTrue(interaction["preview"])
             self.assertTrue(any("Optimized basket plan" in text for text in replies))
-            self.assertTrue(any("Validated cart preview" in text for text in replies))
-            self.assertTrue(any("DRY_RUN" in text for text in replies))
+            self.assertTrue(any("Cart readback preview" in text for text in replies))
+            self.assertTrue(any("No order was placed" in text for text in replies))
             # The orchestrator acknowledges every client ChatMessage, including ACP session control.
             self.assertGreaterEqual(len(shared["acks"]), 3)
 
