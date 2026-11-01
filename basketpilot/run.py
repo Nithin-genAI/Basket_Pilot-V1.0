@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from uagents import Bureau
 from uagents_core.identity import Identity
@@ -15,6 +16,26 @@ from basketpilot.agents.orchestrator import create_orchestrator_agent
 from basketpilot.agents.parser import create_parser_agent
 from basketpilot.agents.search import create_search_agent
 from basketpilot.platforms.mock import default_mock_adapters
+
+
+def load_local_env(path: str | Path | None = None) -> None:
+    """Load simple KEY=VALUE entries from project .env without overriding the shell."""
+    env_path = Path(path) if path is not None else Path(__file__).resolve().parent.parent / ".env"
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if not key or key in os.environ:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[key] = value
 
 
 class LocalOnlyRegistrationPolicy(BatchRegistrationPolicy):
@@ -36,6 +57,7 @@ def seed_for(name: str) -> str:
 
 
 def build_bureau(*, port: int = 8000, session_store=None) -> tuple[Bureau, dict[str, object]]:
+    load_local_env()
     if os.environ.get("BP_MAILBOX", "false").casefold() == "true":
         raise RuntimeError("BP_MAILBOX=true is not supported in this local-only Step 3B build.")
     use_mock = os.environ.get("BP_USE_MOCK", "true").casefold() == "true"
@@ -74,6 +96,7 @@ def build_bureau(*, port: int = 8000, session_store=None) -> tuple[Bureau, dict[
 
 
 def main() -> None:
+    load_local_env()
     os.environ.setdefault("BP_USE_MOCK", "true")
     os.environ.setdefault("BP_MAILBOX", "false")
     os.environ.setdefault("BP_ALLOW_ORDERS", "false")

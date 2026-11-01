@@ -16,11 +16,11 @@ _TRANSITIONS = {
     ("COLLECTING_LIST", "parsed"): "NEED_ADDRESS",
     ("NEED_ADDRESS", "address"): "SEARCHING",
     ("SEARCHING", "planned"): "PLAN_READY",
-    ("PLAN_READY", "build"): "CART_BUILDING",
-    ("CART_BUILDING", "preview"): "AWAITING_CONFIRM",
-    ("AWAITING_CONFIRM", "confirm"): "AWAITING_CONFIRM",
+    ("PLAN_READY", "cart_confirm"): "CART_BUILDING",
+    ("CART_BUILDING", "preview"): "PREVIEW_READY",
     ("FAILED", "list"): "COLLECTING_LIST",
     ("PLACED", "list"): "COLLECTING_LIST",
+    ("PREVIEW_READY", "list"): "COLLECTING_LIST",
 }
 
 

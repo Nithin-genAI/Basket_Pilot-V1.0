@@ -27,6 +27,18 @@ def create_checkout_agent(adapters: dict[str, PlatformAdapter], seed: str, port:
         adapter = adapters.get(msg.platform)
         if adapter is None:
             return
+        if msg.action != "build_preview":
+            await ctx.send(sender, messages.OrderResult(
+                session_id=msg.session_id, platform=msg.platform, status="REJECTED",
+                error="Unsupported checkout action.",
+            ))
+            return
+        if not msg.cart_write_confirmed:
+            await ctx.send(sender, messages.OrderResult(
+                session_id=msg.session_id, platform=msg.platform, status="BLOCKED",
+                error="The user has not explicitly confirmed adding this basket to the cart.",
+            ))
+            return
         if os.environ.get("BP_USE_MOCK", "true").casefold() != "true" and os.environ.get("BP_ALLOW_CART_WRITES", "false").casefold() != "true":
             await ctx.send(sender, messages.OrderResult(
                 session_id=msg.session_id, platform=msg.platform, status="BLOCKED",
@@ -47,7 +59,7 @@ def create_checkout_agent(adapters: dict[str, PlatformAdapter], seed: str, port:
             ctx.logger.warning("Cart preview failed for %s (%s)", msg.platform, type(exc).__name__)
             await ctx.send(sender, messages.OrderResult(
                 session_id=msg.session_id, platform=msg.platform, status="FAILED",
-                error="Could not validate the cart. Please retry.",
+                error="Cart update or readback failed. Check the current Zepto cart before retrying; do not assume it stayed unchanged.",
             ))
             return
 

@@ -40,7 +40,28 @@ READ_TOOLS = frozenset(name for name, policy in TOOL_POLICY.items() if policy is
 
 
 class ZeptoError(Exception):
-    """Safe, user-displayable MCP error without the raw server response."""
+    """Safe MCP error with enough sanitized context to diagnose a failed call."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        tool_name: str | None = None,
+        response_structure: Any = None,
+    ) -> None:
+        self.safe_message = redact(message)
+        self.tool_name = tool_name
+        self.response_structure = response_structure
+        super().__init__(self.safe_message)
+
+    def __str__(self) -> str:
+        if self.tool_name is None:
+            return self.safe_message
+        structure = json.dumps(self.response_structure, sort_keys=True) if self.response_structure is not None else "unavailable"
+        return (
+            f"tool={self.tool_name} error_type={type(self).__name__} "
+            f"message={self.safe_message} response_structure={structure}"
+        )
 
 
 class AuthRequired(ZeptoError):
@@ -91,34 +112,93 @@ def redact(value: Any) -> str:
     """Remove common account and address identifiers before emitting log text."""
     text = str(value)
     text = _SENSITIVE.sub(r"\1[REDACTED]", text)
-    return _PHONE.sub("[REDACTED_PHONE]", text)
+    text = _PHONE.sub("[REDACTED_PHONE]", text)
+    text = re.sub(r"\b\d{6}\b", "[REDACTED_PINCODE]", text)
+    text = re.sub(r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b", "[REDACTED_ID]", text, flags=re.I)
+    return text[:500]
 
 
-def _safe_error(exc: BaseException) -> ZeptoError:
-    message = redact(str(exc)).casefold()
+def _response_structure(result: Any) -> dict[str, Any]:
+    """Describe an MCP response without including its field values."""
+    structured = getattr(result, "structuredContent", None)
+    blocks = getattr(result, "content", None) or ()
+    return {
+        "is_error": bool(getattr(result, "isError", False)),
+        "structured_content": _shape(structured),
+        "content": [
+            {"type": getattr(block, "type", type(block).__name__),
+             "text_length": len(getattr(block, "text", "")) if isinstance(getattr(block, "text", None), str) else None}
+            for block in blocks[:8]
+        ],
+    }
+
+
+def _shape(value: Any, depth: int = 0) -> Any:
+    if value is None:
+        return None
+    if depth >= 3:
+        return {"type": type(value).__name__}
+    if isinstance(value, dict):
+        return {str(key): _shape(child, depth + 1) for key, child in list(value.items())[:30]}
+    if isinstance(value, (list, tuple)):
+        return {"type": type(value).__name__, "length": len(value),
+                "item": _shape(value[0], depth + 1) if value else None}
+    return {"type": type(value).__name__}
+
+
+def _safe_error(
+    exc: BaseException,
+    *,
+    tool_name: str | None = None,
+    response_structure: Any = None,
+) -> ZeptoError:
+    safe_text = redact(str(exc))
+    message = safe_text.casefold()
     if any(key in message for key in (
         "unauthorized", "not authenticated", "authentication required", "login required",
         "token expired", "401", "403",
     )):
-        return AuthRequired("Zepto login is required.")
-    if "closed" in message:
-        return StoreClosed("The Zepto store is closed.")
-    if any(key in message for key in ("unserviceable", "not serviceable", "outside delivery")):
-        return Unserviceable("Zepto does not serve the selected location.")
-    if any(key in message for key in ("store not selected", "store context missing", "address required")):
-        return AddressRequired("Select a Zepto address or store before continuing.")
-    return ToolError("The Zepto request failed.")
+        kind, safe_message = AuthRequired, "Zepto login is required."
+    elif "closed" in message:
+        kind, safe_message = StoreClosed, "The Zepto store is closed."
+    elif any(key in message for key in ("unserviceable", "not serviceable", "outside delivery")):
+        kind, safe_message = Unserviceable, "Zepto does not serve the selected location."
+    elif any(key in message for key in ("store not selected", "store context missing", "address required")):
+        kind, safe_message = AddressRequired, "Select a Zepto address or store before continuing."
+    elif safe_text.strip():
+        kind, safe_message = ToolError, safe_text
+    else:
+        kind, safe_message = ToolError, "MCP returned an error; see sanitized response structure."
+    return kind(safe_message, tool_name=tool_name, response_structure=response_structure)
 
 
-def _unwrap_result(result: Any) -> Any:
+def _attach_tool(exc: ZeptoError, tool_name: str, response_structure: Any = None) -> ZeptoError:
+    if exc.tool_name is None:
+        exc.tool_name = tool_name
+    if exc.response_structure is None:
+        exc.response_structure = response_structure
+    return exc
+
+
+def _unwrap_result(result: Any, *, tool_name: str | None = None) -> Any:
     if getattr(result, "isError", False):
         message = " ".join(getattr(block, "text", "") for block in getattr(result, "content", ()))
-        raise _safe_error(RuntimeError(message))
+        raise _safe_error(
+            RuntimeError(message or "MCP tool returned isError=true."),
+            tool_name=tool_name,
+            response_structure=_response_structure(result),
+        )
     structured = getattr(result, "structuredContent", None)
     if structured is not None:
         return structured
     blocks = getattr(result, "content", None) or ()
     texts = [getattr(block, "text", "") for block in blocks if getattr(block, "text", None)]
+    if len(texts) == 1 and texts[0].lstrip().casefold().startswith("error:"):
+        raise _safe_error(
+            RuntimeError(texts[0]),
+            tool_name=tool_name,
+            response_structure=_response_structure(result),
+        )
     if len(texts) == 1:
         try:
             return json.loads(texts[0])
@@ -224,7 +304,7 @@ class ZeptoMCPClient:
                     self._session.call_tool(tool, arguments=args),  # type: ignore[union-attr]
                     timeout=self.timeout,
                 )
-                return _unwrap_result(result)
+                return _unwrap_result(result, tool_name=tool)
             except asyncio.TimeoutError:
                 if is_read and attempt + 1 < attempts:
                     if self._reconnects < 1:
@@ -232,7 +312,10 @@ class ZeptoMCPClient:
                         await self.close()
                     await asyncio.sleep(self.retry_backoff * (attempt + 1))
                     continue
-                raise ToolTimeout("Zepto request timed out.") from None
+                raise ToolTimeout(
+                    "Zepto request timed out.", tool_name=tool,
+                    response_structure={"transport": "timeout"},
+                ) from None
             except ZeptoError as exc:
                 if (
                     isinstance(exc, ToolError)
@@ -241,9 +324,12 @@ class ZeptoMCPClient:
                 ):
                     await asyncio.sleep(self.retry_backoff * (attempt + 1))
                     continue
-                raise
+                raise _attach_tool(exc, tool, exc.response_structure or {"response": "not returned"}) from None
             except Exception as exc:
-                safe = _safe_error(exc)
+                safe = _safe_error(
+                    exc, tool_name=tool,
+                    response_structure={"transport_exception": type(exc).__name__},
+                )
                 if isinstance(safe, AuthRequired):
                     raise safe from None
                 if is_read and attempt + 1 < attempts and self._reconnects < 1:
@@ -251,6 +337,9 @@ class ZeptoMCPClient:
                     await self.close()
                     await asyncio.sleep(self.retry_backoff)
                     continue
-                logging.getLogger(__name__).warning("Zepto MCP call failed: %s", redact(safe))
+                logging.getLogger(__name__).warning("Zepto MCP call failed: %s", str(safe))
                 raise safe from None
-        raise ToolError("The Zepto request failed.")
+        raise ToolError(
+            "Read retries exhausted.", tool_name=tool,
+            response_structure={"attempts": attempts},
+        )

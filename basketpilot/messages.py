@@ -111,6 +111,7 @@ class CheckoutRequest(Model):
     platform: str
     assignments: list[AssignmentData]
     address_id: str | None = None
+    cart_write_confirmed: bool = False
 
 
 class PreviewLineData(Model):

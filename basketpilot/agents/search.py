@@ -18,10 +18,22 @@ def create_search_agent(adapter: PlatformAdapter, seed: str, port: int) -> Agent
         items = tuple(item_from_wire(row) for row in msg.items)
         ctx.logger.info("Search worker %s resolving %d items for %s", adapter.name, len(items), msg.session_id)
         try:
-            found = await adapter.resolve_items(items)
-            status = await adapter.get_store_status()
+            if msg.address_id:
+                # Presence of ZEPTO_ADDRESS_ID is the user's standing configured choice.
+                select = getattr(adapter, "select_saved_address", None)
+                ctx.logger.info("Selecting configured saved address for %s", msg.session_id)
+                status = await select(msg.address_id) if select else StoreStatus.NEEDS_ADDRESS
+                if status == StoreStatus.OK:
+                    ctx.logger.info("Configured saved address selected; searching products for %s", msg.session_id)
+            else:
+                status = await adapter.get_store_status()
+            if status == StoreStatus.OK:
+                found = await adapter.resolve_items(items)
+                status = await adapter.get_store_status()
+            else:
+                found = tuple()
             fees = await adapter.get_fee_schedule()
-            notice = None
+            notice = None if status == StoreStatus.OK else f"Store status: {status.value}"
         except Exception as exc:  # Adapter failures become unavailable results, never a traceback in chat.
             ctx.logger.warning("Search worker %s failed (%s)", adapter.name, type(exc).__name__)
             found = tuple()

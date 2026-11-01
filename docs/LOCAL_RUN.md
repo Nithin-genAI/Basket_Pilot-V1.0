@@ -33,9 +33,11 @@ For a terminal-driven conversation, run this command instead; it starts the same
 BP_USE_MOCK=true BP_MAILBOX=false BP_ALLOW_ORDERS=false .venv/bin/python scripts/chat_client.py
 ```
 
-Paste a list, give an address label, review the plan and preview, then type `confirm` for the dry-run result. Type `/quit` to end the terminal client.
+Paste a list, give an address label, review the optimized plan, and type `add to cart` to authorize the cart update. The terminal then displays the cart readback and checkout preview. It never places an order or initiates payment. Type `/quit` to end the terminal client.
 
-`BP_USE_MOCK=false` selects the existing Zepto adapter for read/search work. Live cart updates remain blocked unless `BP_ALLOW_CART_WRITES=true`; live order placement remains blocked in this Step 3B runtime, even if `BP_ALLOW_ORDERS` is set. The MCP address ID, if needed for reads, can be supplied with `ZEPTO_ADDRESS_ID` in the environment. Never put credentials or an address into an ACP message.
+For a live Zepto run, first establish the MCP OAuth session and set `BP_USE_MOCK=false`. Set `ZEPTO_ADDRESS_ID` locally; its presence is the standing instruction to select that saved address automatically for each new basket. The search worker selects it in the MCP session before searching. A saved address by itself does not select a store. Live cart updates also require `BP_ALLOW_CART_WRITES=true`; the agent still waits for the separate `add to cart` confirmation after displaying the optimized plan. Keep `BP_ALLOW_ORDERS=false`: order placement and payment are not part of this workflow. Never put credentials or an address into an ACP message.
+
+Zepto's captured `view_cart` contract does not expose bill totals, item prices, or itemized fee amounts. When those fields are absent, the preview marks the displayed subtotal-based total as estimated and lists validation warnings rather than presenting it as a verified checkout bill.
 
 ## Verify
 

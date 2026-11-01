@@ -56,13 +56,15 @@ def create_terminal_agent(
             print(f"\nBasketPilot: {text}")
         lowered = text.casefold()
         prompt = None
-        if "which delivery address" in lowered:
+        if "type `select saved address`" in lowered:
+            prompt = "Type select saved address to authorize this selection (or /quit): "
+        elif "which delivery address" in lowered:
             prompt = "Address label (or /quit): "
         elif "please clarify these lines" in lowered:
             prompt = "Clarified full grocery list (or /quit): "
-        elif "reply `confirm`" in lowered or "reply exactly `confirm`" in lowered:
-            prompt = "Type confirm (or /quit): "
-        elif "confirmation result" in lowered or "dry-run confirmation" in lowered:
+        elif "reply exactly `add to cart`" in lowered:
+            prompt = "Type add to cart to authorize the cart update (or /quit): "
+        elif "preview complete. no order was placed" in lowered:
             prompt = "Session complete. Enter a new grocery list or /quit: "
         if prompt:
             asyncio.create_task(prompt_and_send(ctx, prompt))

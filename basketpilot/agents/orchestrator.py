@@ -30,6 +30,12 @@ def _money(paise: int) -> str:
     return f"Rs {paise_to_rupees(paise)}"
 
 
+def configured_zepto_address_id() -> str | None:
+    """A locally configured address is the user's standing address-selection choice."""
+    value = os.environ.get("ZEPTO_ADDRESS_ID", "").strip()
+    return value or None
+
+
 def _format_plan(plan_msg: messages.CartPlan) -> str:
     lines = ["Optimized basket plan", "item | platform | product | qty | line price"]
     for row in plan_msg.assignments:
@@ -84,22 +90,50 @@ def create_orchestrator_agent(
     async def reply(ctx: Context, recipient: str, text: str) -> None:
         await ctx.send(recipient, ChatMessage(content=[TextContent(type="text", text=text)]))
 
-    async def begin_search(ctx: Context, session_id: str, state: dict[str, Any]) -> None:
+    async def begin_search(
+        ctx: Context, session_id: str, state: dict[str, Any], address_id: str | None = None,
+    ) -> None:
         state["state"] = transition(state["state"], "address")
-        state["address_selected"] = True
+        use_mock = os.environ.get("BP_USE_MOCK", "true").casefold() == "true"
+        state["address_selected"] = use_mock or bool(address_id)
         save(session_id, state)
-        address_by_session[session_id] = "local-selected"
+        if use_mock:
+            address_by_session[session_id] = "local-selected"
+        elif address_id:
+            address_by_session[session_id] = address_id
         expected_search[session_id] = set(search_addresses)
         search_results[session_id].clear()
-        await reply(ctx, sender_by_session[session_id], f"Searching {', '.join(sorted(search_addresses))} in parallel...")
+        if address_id and not use_mock:
+            progress = "Selecting your configured Zepto address, then searching products..."
+        else:
+            progress = f"Searching {', '.join(sorted(search_addresses))} in parallel..."
+        await reply(ctx, sender_by_session[session_id], progress)
         ctx.logger.info("Search fan-out session=%s platforms=%s", session_id, ",".join(sorted(search_addresses)))
         request = messages.SearchRequest(
             session_id=session_id,
             items=[messages.ItemData(**row) for row in state["items"]],
-            address_id="local-selected" if os.environ.get("BP_USE_MOCK", "true").casefold() == "true" else None,
+            address_id=address_id,
         )
         for platform, address in sorted(search_addresses.items()):
             await ctx.send(address, request)
+
+    async def begin_cart_build(ctx: Context, session_id: str, state: dict[str, Any]) -> None:
+        state["state"] = transition(state["state"], "cart_confirm")
+        save(session_id, state)
+        plan = messages.CartPlan(**state["plan"])
+        platforms = sorted({assignment.platform for assignment in plan.assignments})
+        expected_previews[session_id] = set(platforms)
+        previews[session_id].clear()
+        tokens_by_session[session_id].clear()
+        await reply(ctx, sender_by_session[session_id], "Building and validating the confirmed cart...")
+        ctx.logger.info("Checkout preview fan-out session=%s platforms=%s", session_id, ",".join(platforms))
+        for platform in platforms:
+            await ctx.send(checkout_address, messages.CheckoutRequest(
+                session_id=session_id, action="build_preview", platform=platform,
+                assignments=[row for row in plan.assignments if row.platform == platform],
+                address_id=address_by_session.get(session_id),
+                cart_write_confirmed=True,
+            ))
 
     @chat.on_message(ChatMessage)
     async def handle_chat(ctx: Context, sender: str, msg: ChatMessage) -> None:
@@ -124,7 +158,7 @@ def create_orchestrator_agent(
         if not text:
             return
         current = state.get("state", "IDLE")
-        if current in {"IDLE", "FAILED", "PLACED"}:
+        if current in {"IDLE", "FAILED", "PLACED", "PREVIEW_READY"}:
             state = {"state": transition(current, "list"), "raw_list": text, "items": [], "created_at": time.time()}
             save(sid, state)
             await reply(ctx, sender, "Parsing your grocery list...")
@@ -135,13 +169,25 @@ def create_orchestrator_agent(
             await reply(ctx, sender, "Rechecking the clarified list...")
             await ctx.send(parser_address, messages.ParseRequest(session_id=sid, text=text))
         elif current == "NEED_ADDRESS":
-            await begin_search(ctx, sid, state)
-        elif current == "AWAITING_CONFIRM":
-            if text.casefold().strip(" .!\t") not in {"confirm", "confirm order", "confirm & place order"}:
-                await reply(ctx, sender, "The preview is ready. Reply exactly `confirm` for the local dry-run, or start a new chat session to cancel.")
+            if os.environ.get("BP_USE_MOCK", "true").casefold() == "true":
+                await begin_search(ctx, sid, state)
+            elif text.casefold().strip(" .!\t") in {
+                "select saved address", "use saved address", "select my saved address",
+            }:
+                address_id = os.environ.get("ZEPTO_ADDRESS_ID", "").strip()
+                if not address_id:
+                    await reply(ctx, sender, "No configured saved-address ID is available. Set ZEPTO_ADDRESS_ID locally, then type `select saved address` to explicitly select it.")
+                    return
+                await begin_search(ctx, sid, state, address_id=address_id)
+            else:
+                await reply(ctx, sender, "A saved address does not select a Zepto store automatically. Set ZEPTO_ADDRESS_ID locally, then type `select saved address` to authorize selection and search.")
+        elif current == "PLAN_READY":
+            if text.casefold().strip(" .!\t") not in {
+                "add to cart", "confirm basket", "yes add to cart", "add these items to cart",
+            }:
+                await reply(ctx, sender, "Review the optimized basket above. Nothing has been added. Reply exactly `add to cart` to authorize cart changes.")
                 return
-            for platform, token in sorted(tokens_by_session[sid].items()):
-                await ctx.send(checkout_address, messages.ConfirmRequest(session_id=sid, platform=platform, preview_token=token))
+            await begin_cart_build(ctx, sid, state)
         else:
             await reply(ctx, sender, f"This session is {current.lower()}. Please wait for the current step to finish.")
 
@@ -172,7 +218,14 @@ def create_orchestrator_agent(
         if os.environ.get("BP_USE_MOCK", "true").casefold() == "true":
             prompt = f"Parsed {len(msg.items)} items. Which delivery address should I use? Type an address label; the local mock will not save address details."
         else:
-            prompt = f"Parsed {len(msg.items)} items. Select your saved Zepto address first, or set ZEPTO_ADDRESS_ID in the environment, then type continue."
+            address_id = configured_zepto_address_id()
+            if address_id:
+                await begin_search(ctx, sid, state, address_id=address_id)
+                return
+            prompt = (
+                f"Parsed {len(msg.items)} items. Set ZEPTO_ADDRESS_ID locally and restart BasketPilot; "
+                "the configured address will then be selected automatically for each basket."
+            )
         await reply(ctx, sender_by_session[sid], prompt)
 
     @agent.on_message(model=messages.SearchResult)
@@ -186,6 +239,21 @@ def create_orchestrator_agent(
         if set(search_results[sid]) != expected_search.get(sid, set()):
             return
         state = load(sid)
+        login_required = sorted(
+            row.platform for row in search_results[sid].values()
+            if row.store_status == StoreStatus.NEEDS_LOGIN.value
+        )
+        if login_required:
+            state["state"] = "FAILED"
+            save(sid, state)
+            await reply(
+                ctx,
+                sender_by_session[sid],
+                "Zepto requires login for product lookup. The saved address was selected, "
+                "but no product results were returned, so this does not mean the item is unavailable. "
+                "Refresh the Zepto MCP login, then restart this search.",
+            )
+            return
         unavailable = [f"{row.platform}: {row.notice or row.store_status}" for row in search_results[sid].values() if row.store_status != StoreStatus.OK.value]
         if unavailable:
             await reply(ctx, sender_by_session[sid], "Platform notices: " + "; ".join(unavailable))
@@ -215,19 +283,11 @@ def create_orchestrator_agent(
             state["state"] = "FAILED"
             save(sid, state)
             return
-        state["state"] = transition(state["state"], "build")
-        save(sid, state)
-        expected_previews[sid] = set(platforms)
-        previews[sid].clear()
-        tokens_by_session[sid].clear()
-        await reply(ctx, sender_by_session[sid], "Building and validating the proposed carts...")
-        ctx.logger.info("Checkout preview fan-out session=%s platforms=%s", sid, ",".join(platforms))
-        for platform in platforms:
-            await ctx.send(checkout_address, messages.CheckoutRequest(
-                session_id=sid, action="build_preview", platform=platform,
-                assignments=[row for row in msg.assignments if row.platform == platform],
-                address_id=address_by_session.get(sid),
-            ))
+        await reply(
+            ctx,
+            sender_by_session[sid],
+            "Nothing has been added to the cart. Reply exactly `add to cart` to authorize the cart update.",
+        )
 
     @agent.on_message(model=messages.CheckoutPreview)
     async def checkout_preview(ctx: Context, sender: str, msg: messages.CheckoutPreview) -> None:
@@ -244,22 +304,23 @@ def create_orchestrator_agent(
         state = load(sid)
         state["state"] = transition(state["state"], "preview")
         save(sid, state)
-        out = ["Validated cart preview (prices and fees are estimates when marked):"]
+        out = ["Cart readback preview (see validation notes for unverified fields):"]
         for platform, preview in sorted(previews[sid].items()):
             out.append(f"\n{platform}")
             out.extend(f"  {line.title} x{line.qty}: {_money(line.line_total_paise)}" for line in preview.lines)
             out.extend(f"  {fee}: {_money(amount)}" for fee, amount in sorted(preview.fee_lines.items()))
             out.append(f"  subtotal: {_money(preview.subtotal_paise)}")
-            out.append(f"  platform total: {_money(preview.total_paise)}")
+            total_label = "estimated subtotal-based total" if preview.fees_estimated else "platform total"
+            out.append(f"  {total_label}: {_money(preview.total_paise)}")
             if preview.fees_estimated:
-                out.append("  Fee breakdown is estimated.")
+                out.append("  Fee lines or the billed total were not exposed; this estimate may exclude fees.")
             if preview.validation_errors:
                 out.extend(f"  Validation: {error}" for error in preview.validation_errors)
-        out.append("\nNo order has been placed. Reply `confirm` for a dry-run confirmation (BP_ALLOW_ORDERS=false).")
+        out.append("\nPreview complete. No order was placed and no payment was initiated.")
         ctx.logger.info("Sending complete preview message for %s", sid)
         await reply(ctx, sender_by_session[sid], "\n".join(out))
         ctx.logger.info("Preview message delivered for %s", sid)
-        state["state"] = "AWAITING_CONFIRM"
+        state["state"] = "PREVIEW_READY"
         save(sid, state)
 
     @agent.on_message(model=messages.OrderResult)
